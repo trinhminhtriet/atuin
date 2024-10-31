@@ -534,7 +534,8 @@ impl State {
 
     fn scroll_up(&mut self, scroll_len: usize) {
         let i = self.results_state.selected() + scroll_len;
-        self.results_state.select(i.min(self.results_len - 1));
+        self.results_state
+            .select(i.min(self.results_len.saturating_sub(1)));
     }
 
     #[allow(clippy::cast_possible_truncation)]
@@ -621,7 +622,12 @@ impl State {
             preview_width,
         );
         let show_help = settings.show_help && (!compact || f.size().height > 1);
-        let show_tabs = settings.show_tabs;
+        // This is an OR, as it seems more likely for someone to wish to override
+        // tabs unexpectedly being missed, than unexpectedly present.
+        let hide_extra = settings.auto_hide_height != 0
+            && compact
+            && f.size().height <= settings.auto_hide_height;
+        let show_tabs = settings.show_tabs && !hide_extra;
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .margin(0)
@@ -634,6 +640,14 @@ impl State {
                         Constraint::Length(preview_height),                // preview
                         Constraint::Length(if show_tabs { 1 } else { 0 }), // tabs
                         Constraint::Length(if show_help { 1 } else { 0 }), // header (sic)
+                    ]
+                } else if hide_extra {
+                    [
+                        Constraint::Length(if show_help { 1 } else { 0 }), // header
+                        Constraint::Length(0),                             // tabs
+                        Constraint::Min(1),                                // results list
+                        Constraint::Length(0),
+                        Constraint::Length(0),
                     ]
                 } else {
                     [
@@ -659,13 +673,15 @@ impl State {
         // also allocate less 🙈
         let titles: Vec<_> = TAB_TITLES.iter().copied().map(Line::from).collect();
 
-        let tabs = Tabs::new(titles)
-            .block(Block::default().borders(Borders::NONE))
-            .select(self.tab_index)
-            .style(Style::default())
-            .highlight_style(Style::default().bold().white().on_black());
+        if show_tabs {
+            let tabs = Tabs::new(titles)
+                .block(Block::default().borders(Borders::NONE))
+                .select(self.tab_index)
+                .style(Style::default())
+                .highlight_style(Style::default().bold().white().on_black());
 
-        f.render_widget(tabs, tabs_chunk);
+            f.render_widget(tabs, tabs_chunk);
+        }
 
         let style = StyleState {
             compact,
@@ -694,10 +710,27 @@ impl State {
         let stats_tab = self.build_stats(theme);
         f.render_widget(stats_tab, header_chunks[2]);
 
+        let indicator: String = if !hide_extra {
+            " > ".to_string()
+        } else if self.switched_search_mode {
+            format!("S{}>", self.search_mode.as_str().chars().next().unwrap())
+        } else {
+            format!(
+                "{}> ",
+                self.search.filter_mode.as_str().chars().next().unwrap()
+            )
+        };
+
         match self.tab_index {
             0 => {
-                let results_list =
-                    Self::build_results_list(style, results, self.keymap_mode, &self.now, theme);
+                let results_list = Self::build_results_list(
+                    style,
+                    results,
+                    self.keymap_mode,
+                    &self.now,
+                    indicator.as_str(),
+                    theme,
+                );
                 f.render_stateful_widget(results_list, results_list_chunk, &mut self.results_state);
             }
 
@@ -737,31 +770,33 @@ impl State {
             }
         }
 
-        let input = self.build_input(style);
-        f.render_widget(input, input_chunk);
+        if !hide_extra {
+            let input = self.build_input(style);
+            f.render_widget(input, input_chunk);
 
-        let preview_width = if compact {
-            preview_width
-        } else {
-            preview_width - 2
-        };
-        let preview = self.build_preview(
-            results,
-            compact,
-            preview_width,
-            preview_chunk.width.into(),
-            theme,
-        );
-        f.render_widget(preview, preview_chunk);
+            let preview_width = if compact {
+                preview_width
+            } else {
+                preview_width - 2
+            };
+            let preview = self.build_preview(
+                results,
+                compact,
+                preview_width,
+                preview_chunk.width.into(),
+                theme,
+            );
+            f.render_widget(preview, preview_chunk);
 
-        let extra_width = UnicodeWidthStr::width(self.search.input.substring());
+            let extra_width = UnicodeWidthStr::width(self.search.input.substring());
 
-        let cursor_offset = if compact { 0 } else { 1 };
-        f.set_cursor(
-            // Put cursor past the end of the input text
-            input_chunk.x + extra_width as u16 + PREFIX_LENGTH + 1 + cursor_offset,
-            input_chunk.y + cursor_offset,
-        );
+            let cursor_offset = if compact { 0 } else { 1 };
+            f.set_cursor(
+                // Put cursor past the end of the input text
+                input_chunk.x + extra_width as u16 + PREFIX_LENGTH + 1 + cursor_offset,
+                input_chunk.y + cursor_offset,
+            );
+        }
     }
 
     fn build_title(&self, theme: &Theme) -> Paragraph {
@@ -835,6 +870,7 @@ impl State {
         results: &'a [History],
         keymap_mode: KeymapMode,
         now: &'a dyn Fn() -> OffsetDateTime,
+        indicator: &'a str,
         theme: &'a Theme,
     ) -> HistoryList<'a> {
         let results_list = HistoryList::new(
@@ -842,6 +878,7 @@ impl State {
             style.invert,
             keymap_mode == KeymapMode::VimNormal,
             now,
+            indicator,
             theme,
         );
 
@@ -1211,8 +1248,15 @@ fn set_clipboard(_s: String) {}
 
 #[cfg(test)]
 mod tests {
+    use atuin_client::database::Context;
     use atuin_client::history::History;
-    use atuin_client::settings::{Preview, PreviewStrategy, Settings};
+    use atuin_client::settings::{
+        FilterMode, KeymapMode, Preview, PreviewStrategy, SearchMode, Settings,
+    };
+    use time::OffsetDateTime;
+
+    use crate::command::client::search::engines::{self, SearchState};
+    use crate::command::client::search::history_list::ListState;
 
     use super::State;
 
@@ -1367,5 +1411,39 @@ mod tests {
         assert_eq!(preview_static_h3, 3 + border_space);
         assert_eq!(preview_static_limit_at_4, 4 + border_space);
         assert_eq!(settings_preview_fixed, 15 + border_space);
+    }
+
+    // Test when there's no results, scrolling up or down doesn't underflow
+    #[test]
+    fn state_scroll_up_underflow() {
+        let mut state = State {
+            history_count: 0,
+            update_needed: None,
+            results_state: ListState::default(),
+            switched_search_mode: false,
+            search_mode: SearchMode::Fuzzy,
+            results_len: 0,
+            accept: false,
+            keymap_mode: KeymapMode::Auto,
+            prefix: false,
+            current_cursor: None,
+            tab_index: 0,
+            search: SearchState {
+                input: String::new().into(),
+                filter_mode: FilterMode::Directory,
+                context: Context {
+                    session: String::new(),
+                    cwd: String::new(),
+                    hostname: String::new(),
+                    host_id: String::new(),
+                    git_root: None,
+                },
+            },
+            engine: engines::engine(SearchMode::Fuzzy),
+            now: Box::new(OffsetDateTime::now_utc),
+        };
+
+        state.scroll_up(1);
+        state.scroll_down(1);
     }
 }
