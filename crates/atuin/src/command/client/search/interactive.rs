@@ -4,15 +4,6 @@ use std::{
 };
 
 use atuin_common::utils::{self, Escapable as _};
-use crossterm::{
-    cursor::SetCursorStyle,
-    event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
-        KeyboardEnhancementFlags, MouseEvent, PopKeyboardEnhancementFlags,
-        PushKeyboardEnhancementFlags,
-    },
-    execute, terminal,
-};
 use eyre::Result;
 use futures_util::FutureExt;
 use semver::Version;
@@ -38,6 +29,15 @@ use crate::{command::client::search::engines, VERSION};
 
 use ratatui::{
     backend::CrosstermBackend,
+    crossterm::{
+        cursor::SetCursorStyle,
+        event::{
+            self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
+            KeyboardEnhancementFlags, MouseEvent, PopKeyboardEnhancementFlags,
+            PushKeyboardEnhancementFlags,
+        },
+        execute, terminal,
+    },
     layout::{Alignment, Constraint, Direction, Layout},
     prelude::*,
     style::{Modifier, Style},
@@ -205,6 +205,9 @@ impl State {
 
         let ctrl = input.modifiers.contains(KeyModifiers::CONTROL);
         let esc_allow_exit = !(self.tab_index == 0 && self.keymap_mode == KeymapMode::VimInsert);
+        let cursor_at_end_of_line =
+            self.search.input.position() == UnicodeWidthStr::width(self.search.input.as_str());
+        let cursor_at_start_of_line = self.search.input.position() == 0;
 
         // support ctrl-a prefix, like screen or tmux
         if !self.prefix
@@ -221,12 +224,14 @@ impl State {
             KeyCode::Esc if esc_allow_exit => Some(Self::handle_key_exit(settings)),
             KeyCode::Char('[') if ctrl && esc_allow_exit => Some(Self::handle_key_exit(settings)),
             KeyCode::Tab => Some(InputAction::Accept(self.results_state.selected())),
+            KeyCode::Right if cursor_at_end_of_line => {
+                Some(InputAction::Accept(self.results_state.selected()))
+            }
+            KeyCode::Left if cursor_at_start_of_line => Some(Self::handle_key_exit(settings)),
             KeyCode::Char('o') if ctrl => {
                 self.tab_index = (self.tab_index + 1) % TAB_TITLES.len();
-
                 Some(InputAction::Continue)
             }
-
             _ => None,
         };
 
@@ -459,29 +464,7 @@ impl State {
                 }
             }
             KeyCode::Char('u') if ctrl => self.search.input.clear(),
-            KeyCode::Char('r') if ctrl => {
-                let filter_modes = if settings.workspaces && self.search.context.git_root.is_some()
-                {
-                    vec![
-                        FilterMode::Global,
-                        FilterMode::Host,
-                        FilterMode::Session,
-                        FilterMode::Directory,
-                        FilterMode::Workspace,
-                    ]
-                } else {
-                    vec![
-                        FilterMode::Global,
-                        FilterMode::Host,
-                        FilterMode::Session,
-                        FilterMode::Directory,
-                    ]
-                };
-
-                let i = self.search.filter_mode as usize;
-                let i = (i + 1) % filter_modes.len();
-                self.search.filter_mode = filter_modes[i];
-            }
+            KeyCode::Char('r') if ctrl => self.search.rotate_filter_mode(settings, 1),
             KeyCode::Char('s') if ctrl => {
                 self.switched_search_mode = true;
                 self.search_mode = self.search_mode.next(settings);
@@ -605,13 +588,13 @@ impl State {
         theme: &Theme,
     ) {
         let compact = match settings.style {
-            atuin_client::settings::Style::Auto => f.size().height < 14,
+            atuin_client::settings::Style::Auto => f.area().height < 14,
             atuin_client::settings::Style::Compact => true,
             atuin_client::settings::Style::Full => false,
         };
         let invert = settings.invert;
         let border_size = if compact { 0 } else { 1 };
-        let preview_width = f.size().width - 2;
+        let preview_width = f.area().width - 2;
         let preview_height = Self::calc_preview_height(
             settings,
             results,
@@ -621,12 +604,12 @@ impl State {
             border_size,
             preview_width,
         );
-        let show_help = settings.show_help && (!compact || f.size().height > 1);
+        let show_help = settings.show_help && (!compact || f.area().height > 1);
         // This is an OR, as it seems more likely for someone to wish to override
         // tabs unexpectedly being missed, than unexpectedly present.
         let hide_extra = settings.auto_hide_height != 0
             && compact
-            && f.size().height <= settings.auto_hide_height;
+            && f.area().height <= settings.auto_hide_height;
         let show_tabs = settings.show_tabs && !hide_extra;
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -660,7 +643,7 @@ impl State {
                 }
                 .as_ref(),
             )
-            .split(f.size());
+            .split(f.area());
 
         let input_chunk = if invert { chunks[0] } else { chunks[3] };
         let results_list_chunk = if invert { chunks[1] } else { chunks[2] };
@@ -739,9 +722,8 @@ impl State {
                     let message = Paragraph::new("Nothing to inspect")
                         .block(
                             Block::new()
-                                .title(
-                                    Title::from(" Info ".to_string()).alignment(Alignment::Center),
-                                )
+                                .title(Title::from(" Info ".to_string()))
+                                .title_alignment(Alignment::Center)
                                 .borders(Borders::ALL)
                                 .padding(Padding::vertical(2)),
                         )
@@ -791,11 +773,11 @@ impl State {
             let extra_width = UnicodeWidthStr::width(self.search.input.substring());
 
             let cursor_offset = if compact { 0 } else { 1 };
-            f.set_cursor(
+            f.set_cursor_position((
                 // Put cursor past the end of the input text
                 input_chunk.x + extra_width as u16 + PREFIX_LENGTH + 1 + cursor_offset,
                 input_chunk.y + cursor_offset,
-            );
+            ));
         }
     }
 
@@ -1087,15 +1069,12 @@ pub async fn history(
         tab_index: 0,
         search: SearchState {
             input,
-            filter_mode: if settings.workspaces && context.git_root.is_some() {
-                FilterMode::Workspace
-            } else if settings.shell_up_key_binding {
-                settings
-                    .filter_mode_shell_up_key_binding
-                    .unwrap_or(settings.filter_mode)
-            } else {
-                settings.filter_mode
-            },
+            filter_mode: settings
+                .filter_mode_shell_up_key_binding
+                .filter(|_| settings.shell_up_key_binding)
+                .or_else(|| Some(settings.default_filter_mode()))
+                .filter(|&x| x != FilterMode::Workspace || context.git_root.is_some())
+                .unwrap_or(FilterMode::Global),
             context,
         },
         engine: engines::engine(search_mode),
@@ -1324,8 +1303,8 @@ mod tests {
         let no_preview = State::calc_preview_height(
             &settings_preview_auto,
             &results,
-            0 as usize,
-            0 as usize,
+            0_usize,
+            0_usize,
             false,
             1,
             80,
@@ -1334,8 +1313,8 @@ mod tests {
         let preview_h2 = State::calc_preview_height(
             &settings_preview_auto,
             &results,
-            1 as usize,
-            0 as usize,
+            1_usize,
+            0_usize,
             false,
             1,
             80,
@@ -1344,8 +1323,8 @@ mod tests {
         let preview_h3 = State::calc_preview_height(
             &settings_preview_auto,
             &results,
-            2 as usize,
-            0 as usize,
+            2_usize,
+            0_usize,
             false,
             1,
             80,
@@ -1354,8 +1333,8 @@ mod tests {
         let preview_one_line = State::calc_preview_height(
             &settings_preview_auto,
             &results,
-            0 as usize,
-            0 as usize,
+            0_usize,
+            0_usize,
             false,
             1,
             66,
@@ -1364,8 +1343,8 @@ mod tests {
         let preview_limit_at_2 = State::calc_preview_height(
             &settings_preview_auto_h2,
             &results,
-            2 as usize,
-            0 as usize,
+            2_usize,
+            0_usize,
             false,
             1,
             80,
@@ -1374,8 +1353,8 @@ mod tests {
         let preview_static_h3 = State::calc_preview_height(
             &settings_preview_h4,
             &results,
-            1 as usize,
-            0 as usize,
+            1_usize,
+            0_usize,
             false,
             1,
             80,
@@ -1384,8 +1363,8 @@ mod tests {
         let preview_static_limit_at_4 = State::calc_preview_height(
             &settings_preview_h4,
             &results,
-            1 as usize,
-            0 as usize,
+            1_usize,
+            0_usize,
             false,
             1,
             20,
@@ -1394,8 +1373,8 @@ mod tests {
         let settings_preview_fixed = State::calc_preview_height(
             &settings_preview_fixed,
             &results,
-            1 as usize,
-            0 as usize,
+            1_usize,
+            0_usize,
             false,
             1,
             20,
@@ -1403,7 +1382,7 @@ mod tests {
 
         assert_eq!(no_preview, 1);
         // 1 * 2 is the space for the border
-        let border_space = 1 * 2;
+        let border_space = 2;
         assert_eq!(preview_h2, 2 + border_space);
         assert_eq!(preview_h3, 3 + border_space);
         assert_eq!(preview_one_line, 1 + border_space);
