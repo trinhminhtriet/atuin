@@ -1,5 +1,5 @@
 use std::{
-    io::{stdout, Write},
+    io::{Write, stdout},
     time::Duration,
 };
 
@@ -11,8 +11,8 @@ use time::OffsetDateTime;
 use unicode_width::UnicodeWidthStr;
 
 use atuin_client::{
-    database::{current_context, Database},
-    history::{store::HistoryStore, History, HistoryStats},
+    database::{Database, current_context},
+    history::{History, HistoryStats, store::HistoryStore},
     settings::{
         CursorStyle, ExitMode, FilterMode, KeymapMode, PreviewStrategy, SearchMode, Settings,
     },
@@ -25,9 +25,10 @@ use super::{
 };
 
 use crate::command::client::theme::{Meaning, Theme};
-use crate::{command::client::search::engines, VERSION};
+use crate::{VERSION, command::client::search::engines};
 
 use ratatui::{
+    Frame, Terminal, TerminalOptions, Viewport,
     backend::CrosstermBackend,
     crossterm::{
         cursor::SetCursorStyle,
@@ -42,8 +43,7 @@ use ratatui::{
     prelude::*,
     style::{Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{block::Title, Block, BorderType, Borders, Padding, Paragraph, Tabs},
-    Frame, Terminal, TerminalOptions, Viewport,
+    widgets::{Block, BorderType, Borders, Padding, Paragraph, Tabs, block::Title},
 };
 
 const TAB_TITLES: [&str; 2] = ["Search", "Inspect"];
@@ -224,10 +224,12 @@ impl State {
             KeyCode::Esc if esc_allow_exit => Some(Self::handle_key_exit(settings)),
             KeyCode::Char('[') if ctrl && esc_allow_exit => Some(Self::handle_key_exit(settings)),
             KeyCode::Tab => Some(InputAction::Accept(self.results_state.selected())),
-            KeyCode::Right if cursor_at_end_of_line => {
+            KeyCode::Right if cursor_at_end_of_line && settings.keys.accept_past_line_end => {
                 Some(InputAction::Accept(self.results_state.selected()))
             }
-            KeyCode::Left if cursor_at_start_of_line => Some(Self::handle_key_exit(settings)),
+            KeyCode::Left if cursor_at_start_of_line && settings.keys.exit_past_line_start => {
+                Some(Self::handle_key_exit(settings))
+            }
             KeyCode::Char('o') if ctrl => {
                 self.tab_index = (self.tab_index + 1) % TAB_TITLES.len();
                 Some(InputAction::Continue)
@@ -388,7 +390,7 @@ impl State {
             KeyCode::Char(c @ '1'..='9') if modfr => {
                 return c.to_digit(10).map_or(InputAction::Continue, |c| {
                     InputAction::Accept(self.results_state.selected() + c as usize)
-                })
+                });
             }
             KeyCode::Left if ctrl => self
                 .search
@@ -415,6 +417,7 @@ impl State {
             KeyCode::Right => self.search.input.right(),
             KeyCode::Char('f') if ctrl => self.search.input.right(),
             KeyCode::Home => self.search.input.start(),
+            KeyCode::Char('a') if ctrl => self.search.input.start(),
             KeyCode::Char('e') if ctrl => self.search.input.end(),
             KeyCode::End => self.search.input.end(),
             KeyCode::Backspace if ctrl => self
@@ -505,7 +508,7 @@ impl State {
                 self.scroll_down(scroll_len);
             }
             _ => {}
-        };
+        }
 
         InputAction::Continue
     }
@@ -538,8 +541,27 @@ impl State {
             && !results.is_empty()
         {
             let length_current_cmd = results[selected].command.len() as u16;
+            // calculate the number of newlines in the command
+            let num_newlines = results[selected]
+                .command
+                .chars()
+                .filter(|&c| c == '\n')
+                .count() as u16;
+            if num_newlines > 0 {
+                std::cmp::min(
+                    settings.max_preview_height,
+                    results[selected]
+                        .command
+                        .split('\n')
+                        .map(|line| {
+                            (line.len() as u16 + preview_width - 1 - border_size)
+                                / (preview_width - border_size)
+                        })
+                        .sum(),
+                ) + border_size * 2
+            }
             // The '- 19' takes the characters before the command (duration and time) into account
-            if length_current_cmd > preview_width - 19 {
+            else if length_current_cmd > preview_width - 19 {
                 std::cmp::min(
                     settings.max_preview_height,
                     (length_current_cmd + preview_width - 1 - border_size)
@@ -741,7 +763,9 @@ impl State {
 
                 // HACK: I'm following up with abstracting this into the UI container, with a
                 // sub-widget for search + for inspector
-                let feedback = Paragraph::new("The inspector is new - please give feedback (good, or bad) at https://forum.atuin.sh");
+                let feedback = Paragraph::new(
+                    "The inspector is new - please give feedback (good, or bad) at https://forum.atuin.sh",
+                );
                 f.render_widget(feedback, input_chunk);
 
                 return;
@@ -1098,6 +1122,10 @@ pub async fn history(
 
     let mut results = app.query_results(&mut db, settings.smart_sort).await?;
 
+    if settings.inline_height > 0 {
+        terminal.clear()?;
+    }
+
     let mut stats: Option<HistoryStats> = None;
     let accept;
     let result = 'render: loop {
@@ -1116,6 +1144,9 @@ pub async fn history(
                         match app.handle_input(settings, &event::read()?, &mut std::io::stdout())? {
                             InputAction::Continue => {},
                             InputAction::Delete(index) => {
+                                if results.is_empty() {
+                                    break;
+                                }
                                 app.results_len -= 1;
                                 let selected = app.results_state.selected();
                                 if selected == app.results_len {

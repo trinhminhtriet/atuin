@@ -5,7 +5,7 @@ use time::{Date, Duration, Month, OffsetDateTime, Time};
 
 use atuin_client::{database::Database, settings::Settings, theme::Theme};
 
-use atuin_history::stats::{compute, Stats};
+use atuin_history::stats::{Stats, compute};
 
 #[derive(Debug)]
 struct WrappedStats {
@@ -40,13 +40,20 @@ impl WrappedStats {
             "pip3",
             "pipenv",
             "poetry",
+            "pipx",
+            "uv",
             "brew",
             "apt",
             "apt-get",
             "apk",
             "pacman",
+            "yay",
+            "paru",
             "yum",
             "dnf",
+            "dnf5",
+            "rpm",
+            "rpm-ostree",
             "zypper",
             "pkg",
             "chocolatey",
@@ -55,6 +62,7 @@ impl WrappedStats {
             "winget",
             "gem",
             "bundle",
+            "shards",
             "composer",
             "gradle",
             "maven",
@@ -65,6 +73,10 @@ impl WrappedStats {
             "mix",
             "hex",
             "rebar3",
+            "nix",
+            "nix-env",
+            "cabal",
+            "opam",
         ];
 
         let pkg_commands = history
@@ -280,6 +292,12 @@ pub async fn run(
     );
 
     let history = db.range(start, end).await?;
+    if history.is_empty() {
+        println!(
+            "Your history for {year} is empty!\nMaybe 'atuin import' could help you import your previous history 🪄"
+        );
+        return Ok(());
+    }
 
     // Compute overall stats using existing functionality
     let stats = compute(settings, &history, 10, 1).expect("Failed to compute stats");

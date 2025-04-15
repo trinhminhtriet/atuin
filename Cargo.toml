@@ -5,9 +5,9 @@ resolver = "2"
 exclude = ["ui/backend"]
 
 [workspace.package]
-version = "18.4.0"
+version = "18.5.0"
 authors = ["Ellie Huxtable <ellie@atuin.sh>"]
-rust-version = "1.82"
+rust-version = "1.86"
 license = "MIT"
 homepage = "https://atuin.sh"
 repository = "https://github.com/atuinsh/atuin"
@@ -23,7 +23,7 @@ time = { version = "0.3.36", features = [
   "local-offset",
 ] }
 clap = { version = "4.5.7", features = ["derive"] }
-config = { version = "0.13", default-features = false, features = ["toml"] }
+config = { version = "0.15.8", default-features = false, features = ["toml"] }
 directories = "5.0.1"
 eyre = "0.6"
 fs-err = "2.9"
@@ -42,6 +42,9 @@ thiserror = "1.0"
 rustix = { version = "0.38.34", features = ["process", "fs"] }
 tower = "0.4"
 tracing = "0.1"
+sql-builder = "3"
+tempfile = { version = "3.19" }
+minijinja = "2.9.0"
 
 [workspace.dependencies.tracing-subscriber]
 version = "0.3"
